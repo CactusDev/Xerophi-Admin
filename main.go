@@ -5,14 +5,23 @@ import (
 	"go/build"
 	"os"
 	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/CactusDev/Xerophi/redis"
 	"github.com/CactusDev/Xerophi/rethink"
+	"github.com/CactusDev/Xerophi/secure"
+	"github.com/CactusDev/Xerophi/user"
 
+	"github.com/fatih/structs"
+
+	mapstruct "github.com/mitchellh/mapstructure"
 	log "github.com/sirupsen/logrus"
 )
 
 var config Config
+var redisConn *redis.Connection
+var rethinkConn *rethink.Connection
 
 const menuString = `
     +-=============================-+
@@ -24,9 +33,7 @@ const menuString = `
     +-------------------------------+
     |   a   | Adds a new user       |
     |   u   | Updates user's info   |				
-    |   r   | Removes a user	    |
-    |   g   | Generate an admin     |	
-    | ----- | 	JWT auth token      |
+    |   r   | Removes a user				|
     |   q   | Quit                  |
     +-=============================-+
     `
@@ -34,10 +41,186 @@ const menuString = `
 // λ is a dope character, why not use it?
 const prompt = "λ | "
 
-func addUser()    {}
-func updateUser() {}
-func removeUser() {}
-func genToken()   {}
+const displayUserDetails = `
+	Record retrieved:
+		ID: %s
+		Token: %s
+		Username: %s
+		User ID: %d
+		Service: %s
+		
+	`
+
+type localUser struct {
+	Hash      string  `json:"hash"`
+	Token     string  `json:"token"`
+	UserID    int     `json:"userId"`
+	UserName  string  `json:"userName"`
+	Service   string  `json:"service"`
+	CreatedAt string  `json:"createdAt"`
+	DeletedAt float64 `json:"deletedAt"`
+}
+
+func pauseForInput() {
+	fmt.Scanln(nil)
+}
+
+func getData(msg string) localUser {
+	var userName, password, token, service string
+
+	fmt.Println(msg)
+
+	// Get username
+	fmt.Print("Username: ")
+	fmt.Scanln(&userName)
+
+	// Get the user token
+	fmt.Print("Token: ")
+	fmt.Scanln(&token)
+
+	// Get password
+	fmt.Print("Password: ")
+	fmt.Scanln(&password)
+
+	// Get service
+	fmt.Print("Service: ")
+	fmt.Scanln(&service)
+
+	return localUser{
+		UserName: userName,
+		Token:    token,
+		Hash:     string(secure.HashArgon(password)),
+		Service:  service,
+	}
+}
+
+func addUser() bool {
+	clearScreen()
+
+	newUser := getData("New user info")
+
+	// Get User ID
+	id, err := rethinkConn.GetTotalRecords("users", nil)
+	if err != nil {
+		log.Error(err)
+		return false
+	}
+
+	// Update user object
+	newUser.CreatedAt = time.Now().Format(time.RFC3339)
+	newUser.DeletedAt = 0.0
+	newUser.UserID = id
+
+	// Add object to users table in DB
+	rethinkConn.Create("users", structs.Map(newUser))
+
+	log.Infof("Succesfully added user %v", newUser)
+
+	// Done
+	return true
+}
+
+func updateUser() bool {
+	clearScreen()
+
+	// Get the new info
+	updateVals := getData(
+		"Update info. Leave empty to leave the same, token is required")
+
+	if updateVals.Token == "" {
+		log.Error("Token required!")
+		return false
+	}
+
+	// Retrieve the user by token
+	res, err := rethinkConn.GetSingle(
+		"users", map[string]interface{}{"token": updateVals.Token})
+
+	// Put it into a user oject
+	var dbVals user.Database
+	mapstruct.Decode(res, &dbVals)
+
+	// Update any non-empty fields
+	dbVals.Token = updateVals.Token // Always set, required
+	if updateVals.Hash != "" {
+		dbVals.Hash = updateVals.Hash
+	}
+	if updateVals.UserName != "" {
+		dbVals.UserName = updateVals.UserName
+	}
+	if updateVals.Service != "" {
+		dbVals.Service = updateVals.Service
+	}
+
+	var toUpdateMap map[string]interface{}
+	mapstruct.Decode(dbVals, &toUpdateMap)
+
+	// Update the record
+	_, err = rethinkConn.Update("users", dbVals.ID, toUpdateMap)
+	if err != nil {
+		log.Error(err)
+		return false
+	}
+
+	log.Info("Succesfully updated user ID: %d, token: %s",
+		dbVals.UserID, dbVals.Token)
+	return true
+}
+
+func removeUser() bool {
+	var token string
+	clearScreen()
+
+	// Get token to delete
+	fmt.Print("Token: ")
+	fmt.Scanln(&token)
+
+	// Retrieve record from token
+	res, err := rethinkConn.GetSingle(
+		"users", map[string]interface{}{"token": token})
+	if err != nil {
+		log.Error(err)
+		return false
+	}
+
+	// Decode into struct
+	var dbVals user.Database
+	mapstruct.Decode(res, &dbVals)
+
+	// Print record to confirm
+	fmt.Printf(displayUserDetails,
+		dbVals.ID, dbVals.Token, dbVals.UserName, dbVals.UserID, dbVals.Service)
+
+	// Confirm delete
+	var confirmDel string
+	fmt.Print("Confirm deletion [y/n]: ")
+	fmt.Scanln(&confirmDel)
+
+	if strings.ToLower(confirmDel) != "y" {
+		// Any other character than pressing an
+		log.Warn("Didn't receive confirmation, not removing")
+		return true
+	} else {
+		// Hard delete
+		fmt.Print("Hard deletion [y/n]: ")
+		fmt.Scanln(&confirmDel)
+		if strings.ToLower(confirmDel) != "y" {
+			// Soft deletion
+			_, err = rethinkConn.Disable("users", dbVals.ID)
+		} else {
+			// Hard deletion
+			_, err = rethinkConn.Delete("users", dbVals.ID)
+		}
+		// Failed
+		if err != nil {
+			log.Error(err)
+			return false
+		}
+	}
+
+	log.Infof("Succesfully removed %s, UUID: %s", dbVals.Token, dbVals.ID)
+	return true
+}
 
 func clearScreen() {
 	var cmd = exec.Command("clear")
@@ -58,7 +241,7 @@ func main() {
 
 	// Initialize connection to RethinkDB
 	log.Info("Connecting to RethinkDB...")
-	rethinkConn := &rethink.Connection{
+	rethinkConn = &rethink.Connection{
 		DB:   config.Rethink.DB,
 		Opts: config.Rethink.Connection,
 	}
@@ -70,7 +253,7 @@ func main() {
 
 	// Initialize connection Redis
 	log.Info("Connecting to Redis...")
-	redisConn := &redis.Connection{
+	redisConn = &redis.Connection{
 		DB:   config.Redis.DB,
 		Opts: config.Redis.Connection,
 	}
@@ -112,17 +295,15 @@ func main() {
 		case "r":
 			// Remove a user
 			removeUser()
-		case "g":
-			// Generate an admin/root JWT auth token
-			genToken()
 		default:
 			// Some other random thing
 			// Display an error
 			fmt.Printf("Invalid option \"%s\".", input)
 		}
-		fmt.Println("Press enter to continue...")
+
 		// Wait for acknowledgement
-		fmt.Scanln(nil)
+		fmt.Println("Press enter to continue...")
+		pauseForInput()
 	}
 
 	// Cleanup code here
