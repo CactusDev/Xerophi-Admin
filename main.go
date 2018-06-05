@@ -13,8 +13,6 @@ import (
 	"github.com/CactusDev/Xerophi/secure"
 	"github.com/CactusDev/Xerophi/user"
 
-	"github.com/fatih/structs"
-
 	mapstruct "github.com/mitchellh/mapstructure"
 	log "github.com/sirupsen/logrus"
 )
@@ -22,6 +20,7 @@ import (
 var config Config
 var redisConn *redis.Connection
 var rethinkConn *rethink.Connection
+var empty string
 
 const menuString = `
     +-=============================-+
@@ -33,7 +32,7 @@ const menuString = `
     +-------------------------------+
     |   a   | Adds a new user       |
     |   u   | Updates user's info   |				
-    |   r   | Removes a user				|
+    |   r   | Removes a user        |
     |   q   | Quit                  |
     +-=============================-+
     `
@@ -42,14 +41,14 @@ const menuString = `
 const prompt = "λ | "
 
 const displayUserDetails = `
-	Record retrieved:
-		ID: %s
-		Token: %s
-		Username: %s
-		User ID: %d
-		Service: %s
-		
-	`
+  Record retrieved:
+    ID: %s
+    Token: %s
+    Username: %s
+    User ID: %d
+    Service: %s
+    
+  `
 
 type localUser struct {
 	Hash      string  `json:"hash"`
@@ -62,7 +61,7 @@ type localUser struct {
 }
 
 func pauseForInput() {
-	fmt.Scanln(nil)
+	fmt.Scanln(&empty)
 }
 
 func getData(msg string) localUser {
@@ -112,9 +111,9 @@ func addUser() bool {
 	newUser.UserID = id
 
 	// Add object to users table in DB
-	rethinkConn.Create("users", structs.Map(newUser))
+	rethinkConn.Create("users")
 
-	log.Infof("Succesfully added user %v", newUser)
+	log.Infof("Succesfully added user %+v", newUser)
 
 	// Done
 	return true
