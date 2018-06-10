@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"go/build"
 	"os"
@@ -51,6 +52,7 @@ const displayUserDetails = `
   `
 
 type localUser struct {
+	Salt      string  `json:"salt"`
 	Hash      string  `json:"hash"`
 	Token     string  `json:"token"`
 	UserID    int     `json:"userId"`
@@ -81,14 +83,17 @@ func getData(msg string) localUser {
 	fmt.Print("Password: ")
 	fmt.Scanln(&password)
 
+	hash, salt := secure.HashPassword(password)
+
 	// Get service
 	fmt.Print("Service: ")
 	fmt.Scanln(&service)
 
 	return localUser{
+		Salt:     string(salt),
 		UserName: userName,
 		Token:    token,
-		Hash:     string(secure.HashArgon(password)),
+		Hash:     hash,
 		Service:  service,
 	}
 }
@@ -110,8 +115,21 @@ func addUser() bool {
 	newUser.DeletedAt = 0.0
 	newUser.UserID = id
 
+	userBytes, err := json.Marshal(newUser)
+	if err != nil {
+		log.Error(err)
+		return false
+	}
+
+	var createVals = make(map[string]interface{})
+	err = json.Unmarshal(userBytes, &createVals)
+	if err != nil {
+		log.Error(err)
+		return false
+	}
+
 	// Add object to users table in DB
-	rethinkConn.Create("users")
+	rethinkConn.Create("users", createVals)
 
 	log.Infof("Succesfully added user %+v", newUser)
 
@@ -123,39 +141,49 @@ func updateUser() bool {
 	clearScreen()
 
 	// Get the new info
-	updateVals := getData(
+	inputVals := getData(
 		"Update info. Leave empty to leave the same, token is required")
 
-	if updateVals.Token == "" {
+	if inputVals.Token == "" {
 		log.Error("Token required!")
 		return false
 	}
 
 	// Retrieve the user by token
 	res, err := rethinkConn.GetSingle(
-		"users", map[string]interface{}{"token": updateVals.Token})
+		"users", map[string]interface{}{"token": inputVals.Token})
 
 	// Put it into a user oject
 	var dbVals user.Database
 	mapstruct.Decode(res, &dbVals)
 
 	// Update any non-empty fields
-	dbVals.Token = updateVals.Token // Always set, required
-	if updateVals.Hash != "" {
-		dbVals.Hash = updateVals.Hash
+	dbVals.Token = inputVals.Token // Always set, required
+	if inputVals.Hash != "" {
+		dbVals.Hash = inputVals.Hash
 	}
-	if updateVals.UserName != "" {
-		dbVals.UserName = updateVals.UserName
+	if inputVals.UserName != "" {
+		dbVals.UserName = inputVals.UserName
 	}
-	if updateVals.Service != "" {
-		dbVals.Service = updateVals.Service
+	if inputVals.Service != "" {
+		dbVals.Service = inputVals.Service
 	}
 
-	var toUpdateMap map[string]interface{}
-	mapstruct.Decode(dbVals, &toUpdateMap)
+	var updateVals = make(map[string]interface{})
+	userBytes, err := json.Marshal(dbVals)
+	if err != nil {
+		log.Error(err)
+		return false
+	}
+
+	err = json.Unmarshal(userBytes, &updateVals)
+	if err != nil {
+		log.Error(err)
+		return false
+	}
 
 	// Update the record
-	_, err = rethinkConn.Update("users", dbVals.ID, toUpdateMap)
+	_, err = rethinkConn.Update("users", dbVals.ID, updateVals)
 	if err != nil {
 		log.Error(err)
 		return false
